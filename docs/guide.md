@@ -4,7 +4,7 @@
 
 ## Install / update
 
-Once the first release is published, the same command installs or updates the binary:
+The same command installs or updates the binary from the latest release:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/smturtle2/adb-input/main/install.sh | sh

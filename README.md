@@ -27,7 +27,7 @@ You need `adb`, authorized Android USB/wireless debugging, and read access to Li
 keyboard and mouse devices. Android must allow the ADB shell to access `/dev/uhid`.
 See [setup and permissions](docs/guide.md#linux-permissions-and-scope).
 
-Install or update **once a release is published**:
+Install or update from the [latest release](https://github.com/smturtle2/adb-input/releases/latest):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/smturtle2/adb-input/main/install.sh | sh
