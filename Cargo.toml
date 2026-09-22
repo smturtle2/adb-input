@@ -1,0 +1,19 @@
+[workspace]
+members = ["crates/protocol", "crates/agent", "crates/cli", "xtask"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.96"
+license = "EUPL-1.2"
+repository = "https://github.com/smturtle2/adb-input"
+
+[workspace.dependencies]
+anyhow = "1"
+libc = "0.2"
+adb-input-protocol = { path = "crates/protocol" }
+
+[profile.release]
+lto = "thin"
+strip = true

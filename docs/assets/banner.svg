@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="340" viewBox="0 0 1100 340" role="img" aria-labelledby="title desc">
+  <title id="title">adb-input</title>
+  <desc id="desc">Your keyboard and mouse. On Android. Linux to Android over ADB, switched with Ctrl + Shift + R.</desc>
+  <defs>
+    <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#111b2a"/><stop offset="1" stop-color="#182d36"/></linearGradient>
+    <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse"><path d="M28 0H0V28" fill="none" stroke="#8de4ce" stroke-opacity=".045"/></pattern>
+  </defs>
+  <rect width="1100" height="340" rx="22" fill="url(#bg)"/>
+  <rect width="1100" height="340" rx="22" fill="url(#grid)"/>
+  <g font-family="system-ui, -apple-system, 'Segoe UI', sans-serif">
+    <text x="56" y="58" fill="#79dbc1" font-size="12" font-weight="650" letter-spacing="3">LINUX → ANDROID / ADB</text>
+    <text x="53" y="138" fill="#f1f6f8" font-size="64" font-weight="750" letter-spacing="-3">adb-input</text>
+    <text x="56" y="185" fill="#c0ced7" font-size="23">Your keyboard and mouse. On Android.</text>
+    <rect x="56" y="232" width="206" height="44" rx="9" fill="#79dbc1"/>
+    <text x="159" y="260" text-anchor="middle" fill="#112c2c" font-size="16" font-weight="700">Ctrl + Shift + R</text>
+    <text x="281" y="260" fill="#a5bac5" font-size="15">Switch input.</text>
+  </g>
+  <g fill="none" stroke="#79dbc1" stroke-width="2.5" stroke-linejoin="round">
+    <rect x="671" y="88" width="190" height="128" rx="10" fill="#14252f"/>
+    <path d="M671 192h190M753 216v25m-34 0h94"/>
+    <rect x="917" y="116" width="91" height="164" rx="15" fill="#14252f"/>
+    <path d="M948 128h29M951 267h23M875 160h26m-7-7 7 7-7 7"/>
+    <path d="m696 120 12 10-12 10m26 0h32" stroke="#e2f8f1"/>
+    <rect x="685" y="259" width="151" height="35" rx="7" stroke="#688b96"/>
+    <path d="M700 271h9m9 0h9m9 0h9m9 0h9m9 0h9m9 0h9m9 0h9m-98 12h74" stroke="#688b96"/>
+    <path d="m945 173 0 39 10-10 9 17 8-5-9-16h15z" fill="#79dbc1"/>
+  </g>
+</svg>
