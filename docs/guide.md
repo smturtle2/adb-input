@@ -15,13 +15,13 @@ It detects Linux x86_64 or ARM64, verifies the release checksum, and atomically 
 or alter firewall rules. Add `~/.local/bin` to your PATH if it is not already there.
 A running process keeps its current version until restarted.
 
-Optional: `ADB_INPUT_VERSION=v0.1.0`, `ADB_INPUT_BIN_DIR`, `ADB_INPUT_DATA_DIR`,
+Optional: `ADB_INPUT_VERSION=v0.2.0`, `ADB_INPUT_BIN_DIR`, `ADB_INPUT_DATA_DIR`,
 `ADB_INPUT_REPOSITORY`, and `ADB_INPUT_RELEASE_BASE`. Apply overrides to the `sh`
 side of the pipeline, for example:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/smturtle2/adb-input/main/install.sh |
-  ADB_INPUT_VERSION=v0.1.0 sh
+  ADB_INPUT_VERSION=v0.2.0 sh
 ```
 
 The installer requires standard Unix utilities, curl, tar, and sha256sum or shasum. Android platform-tools
