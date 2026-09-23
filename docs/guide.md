@@ -63,7 +63,12 @@ adb-input run --device SERIAL          # select one of multiple devices
 adb-input run --connect PHONE_IP:PORT   # connect and run in one command
 ```
 
-USB and TCP connections (including VPN addresses) use the same input protocol.
+USB and wireless connections use the same controls. For an IPv4 wireless ADB
+connection, the app also tries an encrypted UDP path for mouse movement. It sends
+the same movement over ADB as a backup; if UDP cannot reach the phone, ADB continues
+alone. Keyboard input, clicks, switching, and shutdown stay on ADB. The Android agent
+uses a temporary UDP port for the session, so VPN or firewall rules must allow that
+port for the faster path.
 Start in **DESKTOP** mode. Press and release **Ctrl+Shift+R** to switch to **PHONE**;
 press and release it again to return. The chord is reserved and is not typed into
 the phone. F12 is a normal forwarded key. Exit with Ctrl+C from desktop mode.

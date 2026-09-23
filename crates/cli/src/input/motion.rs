@@ -4,6 +4,13 @@ use evdev::{
     AbsoluteAxisCode, EventSummary, InputEvent, KeyCode, RelativeAxisCode, SynchronizationCode,
 };
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct MotionReport {
+    pub(super) x: i32,
+    pub(super) y: i32,
+    pub(super) wheel: i32,
+}
+
 #[derive(Default)]
 pub(super) struct Motion {
     x: f64,
@@ -23,11 +30,7 @@ impl Motion {
         };
     }
 
-    pub(super) fn update(
-        &mut self,
-        event: InputEvent,
-        sensitivity: f64,
-    ) -> Option<(i32, i32, i32)> {
+    pub(super) fn update(&mut self, event: InputEvent, sensitivity: f64) -> Option<MotionReport> {
         match event.destructure() {
             EventSummary::Key(_, key, value)
                 if (KeyCode::BTN_LEFT.0..=KeyCode::BTN_EXTRA.0).contains(&key.0) =>
@@ -80,7 +83,7 @@ impl Motion {
                 self.y -= f64::from(y);
                 self.wheel = 0;
                 self.dirty = false;
-                return Some((x, y, wheel));
+                return Some(MotionReport { x, y, wheel });
             }
             _ => {}
         }
@@ -97,7 +100,7 @@ mod tests {
         InputEvent::new(kind.0, code, value)
     }
 
-    fn report(motion: &mut Motion) -> Option<(i32, i32, i32)> {
+    fn report(motion: &mut Motion) -> Option<MotionReport> {
         motion.update(
             event(
                 EventType::SYNCHRONIZATION,
@@ -106,6 +109,10 @@ mod tests {
             ),
             1.0,
         )
+    }
+
+    fn output(x: i32, y: i32, wheel: i32) -> Option<MotionReport> {
+        Some(MotionReport { x, y, wheel })
     }
 
     #[test]
@@ -120,7 +127,7 @@ mod tests {
         ] {
             assert_eq!(motion.update(event(kind, code, value), 0.5), None);
         }
-        assert_eq!(report(&mut motion), Some((1, -1, 2)));
+        assert_eq!(report(&mut motion), output(1, -1, 2));
         assert_eq!(motion.buttons, 0b10001);
         assert_eq!(report(&mut motion), None);
         motion.update(
@@ -132,7 +139,7 @@ mod tests {
             0.5,
         );
         motion.update(event(EventType::KEY, KeyCode::BTN_LEFT.0, 0), 1.0);
-        assert_eq!(report(&mut motion), Some((1, -1, 0)));
+        assert_eq!(report(&mut motion), output(1, -1, 0));
         assert_eq!(motion.buttons, 0b10000);
     }
 
@@ -149,7 +156,7 @@ mod tests {
         assert_eq!(report(&mut motion), None);
         motion.update(x(150), 2.0);
         motion.update(y(400), 2.0);
-        assert_eq!(report(&mut motion), Some((200, -200, 0)));
+        assert_eq!(report(&mut motion), output(200, -200, 0));
         motion.update(event(EventType::KEY, KeyCode::BTN_LEFT.0, 1), 1.0);
         motion.reset();
         assert_eq!(motion.buttons, 0);
@@ -159,6 +166,18 @@ mod tests {
         assert_eq!(report(&mut motion), None);
         motion.update(x(950), 1.0);
         motion.update(y(900), 1.0);
-        assert_eq!(report(&mut motion), Some((100, -100, 0)));
+        assert_eq!(report(&mut motion), output(100, -100, 0));
+    }
+
+    #[test]
+    fn discrete_reports_keep_button_and_wheel_state() {
+        let mut motion = Motion::default();
+        motion.update(event(EventType::KEY, KeyCode::BTN_LEFT.0, 1), 1.0);
+        assert_eq!(report(&mut motion), output(0, 0, 0));
+        motion.update(
+            event(EventType::RELATIVE, RelativeAxisCode::REL_WHEEL.0, 2),
+            1.0,
+        );
+        assert_eq!(report(&mut motion), output(0, 0, 2));
     }
 }

@@ -42,7 +42,7 @@ Publishing a `vX.Y.Z` tag is a separate action; creating these files does not pu
 
 `adb-input probe` tests agent startup/device creation and cleanup without capturing
 or typing. Before this Rust implementation, the basic UHID path was tested on an S25;
-the Rust agent, CLI keyboard/mouse forwarding and the original Ctrl+Alt+R switching were then
+the Rust agent, CLI keyboard/mouse forwarding and Ctrl+Shift+R switching were then
 confirmed on the same device over a VPN from a remote desktop session. Other vendors
 and ARM64 Linux hosts have not received interactive hardware testing yet.
 
@@ -52,7 +52,9 @@ and ARM64 Linux hosts have not received interactive hardware testing yet.
   - `input/mod.rs`: input switching, held keys, event loop and forwarding.
   - `input/source.rs`: evdev discovery, capabilities and device grabs.
   - `input/motion.rs`: pointer buttons, relative/absolute movement and report boundaries.
+  - `input/bins.rs`: per-source cadence estimation and motion bins.
+  - `udp.rs`: optional encrypted wireless motion path; ADB remains the ordered backup.
   - `control.rs`: process signals and session lifetime.
-- `crates/protocol`: wire packets and HID keyboard/mouse report encoding.
-- `crates/agent`: Android UHID devices and transport watchdog.
+- `crates/protocol`: ADB packets, encrypted UDP datagrams and HID report encoding.
+- `crates/agent`: Android UHID devices, latest-bin sampling, UDP reception and transport watchdog.
 - `xtask`: cross-builds and release packaging.

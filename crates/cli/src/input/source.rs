@@ -1,16 +1,59 @@
 // SPDX-License-Identifier: EUPL-1.2
 //! Input-device discovery and local grab ownership.
-use super::motion::Motion;
+use super::{bins::MotionBins, motion::Motion};
+use crate::clock::{monotonic_us, realtime_to_monotonic_offset_us};
 use anyhow::{bail, Result};
-use evdev::{AbsoluteAxisCode, Device, KeyCode, RelativeAxisCode};
-use std::path::PathBuf;
+use evdev::{AbsoluteAxisCode, Device, InputEvent, KeyCode, RelativeAxisCode};
+use std::{io, os::fd::AsRawFd, path::PathBuf, time::UNIX_EPOCH};
 
 pub(super) struct Source {
+    pub(super) id: u32,
     pub(super) device: Device,
     pub(super) keyboard: bool,
     pub(super) pointer: bool,
     pub(super) grabbed: bool,
     pub(super) motion: Motion,
+    pub(super) bins: MotionBins,
+    event_to_monotonic_offset_us: i128,
+}
+
+impl Source {
+    pub(super) fn timestamp_us(&self, event: InputEvent) -> io::Result<u64> {
+        // evdev presents timeval as SystemTime even when EVIOCSCLOCKID selects
+        // CLOCK_MONOTONIC. Map the event's native clock to monotonic once, so
+        // queued reports retain their original spacing during a delayed read.
+        let elapsed = event
+            .timestamp()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "negative evdev timestamp"))?;
+        let raw = i128::try_from(elapsed.as_micros())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "evdev timestamp overflow"))?;
+        let mapped = raw.saturating_sub(self.event_to_monotonic_offset_us);
+        let mapped = u64::try_from(mapped).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "evdev clock moved backwards")
+        })?;
+        // A realtime-clock step cannot be allowed to schedule a bin far in
+        // the future. Ordinary old reports remain old and are dropped later.
+        if mapped > monotonic_us()?.saturating_add(1_000_000) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "evdev clock moved forwards",
+            ));
+        }
+        Ok(mapped)
+    }
+}
+
+fn set_monotonic_event_clock(device: &Device) -> bool {
+    let clock_id = libc::CLOCK_MONOTONIC;
+    // Linux input.h: EVIOCSCLOCKID = _IOW('E', 0xa0, int).
+    (unsafe {
+        libc::ioctl(
+            device.as_raw_fd(),
+            libc::_IOW::<libc::c_int>(u32::from(b'E'), 0xa0),
+            &clock_id,
+        )
+    }) == 0
 }
 fn capabilities(d: &Device) -> (bool, bool) {
     let keyboard = d
@@ -37,6 +80,11 @@ pub(super) fn discover() -> Vec<(PathBuf, Source)> {
             if device.set_nonblocking(true).is_err() {
                 return None;
             }
+            let event_to_monotonic_offset_us = if set_monotonic_event_clock(&device) {
+                0
+            } else {
+                realtime_to_monotonic_offset_us().ok()?
+            };
             let mut motion = Motion::default();
             if let Ok(axes) = device.get_absinfo() {
                 for (axis, info) in axes {
@@ -49,11 +97,14 @@ pub(super) fn discover() -> Vec<(PathBuf, Source)> {
             Some((
                 path,
                 Source {
+                    id: 0,
                     device,
                     keyboard,
                     pointer,
                     grabbed: false,
                     motion,
+                    bins: MotionBins::default(),
+                    event_to_monotonic_offset_us,
                 },
             ))
         })
@@ -66,6 +117,7 @@ impl Source {
             self.grabbed = false;
         }
         self.motion.reset();
+        self.bins.reset();
     }
 }
 

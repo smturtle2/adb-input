@@ -1,14 +1,32 @@
 // SPDX-License-Identifier: EUPL-1.2
-use adb_input_protocol::{Packet, READY, WATCHDOG_SECS};
+use adb_input_protocol::{mouse_hid_reports, Packet, READY, WATCHDOG_SECS};
 use std::{
     fs::{File, OpenOptions},
     io::{self, Write},
+    net::UdpSocket,
     sync::{
         atomic::{AtomicU64, Ordering},
+        mpsc::{self, RecvTimeoutError, TryRecvError},
         Arc,
     },
     time::{Duration, Instant},
 };
+
+mod motion;
+mod udp;
+use motion::{MotionBin, MotionSampler, MouseOutput};
+
+enum Input {
+    Adb(io::Result<Option<Packet>>),
+    Udp { epoch: u64, bin: MotionBin },
+}
+
+struct Session {
+    armed: bool,
+    epoch: u64,
+    udp_socket: Option<UdpSocket>,
+    sender: mpsc::Sender<Input>,
+}
 
 const KEYBOARD: &[u8] = &[
     0x05, 1, 0x09, 6, 0xa1, 1, 0x05, 7, 0x19, 0xe0, 0x29, 0xe7, 0x15, 0, 0x25, 1, 0x75, 1, 0x95, 8,
@@ -63,6 +81,135 @@ impl Drop for Device {
         let _ = self.report(&vec![0; self.report_size]);
     }
 }
+
+fn emit_mouse(device: &mut Device, output: MouseOutput) -> io::Result<()> {
+    for report in mouse_hid_reports(output.buttons, output.dx, output.dy, output.wheel) {
+        device.report(&report)?;
+    }
+    Ok(())
+}
+
+fn read_input(sender: mpsc::Sender<Input>) {
+    let mut input = io::stdin().lock();
+    loop {
+        let packet = Packet::read(&mut input);
+        let done = !matches!(&packet, Ok(Some(p)) if !matches!(p, Packet::Stop));
+        if sender.send(Input::Adb(packet)).is_err() || done {
+            break;
+        }
+    }
+}
+
+fn ack_control(control_id: u64) -> io::Result<()> {
+    let mut output = io::stdout().lock();
+    writeln!(output, "ACK {control_id}")?;
+    output.flush()
+}
+
+fn handle_input(
+    input: Input,
+    keyboard: &mut Device,
+    mouse: &mut Device,
+    sampler: &mut MotionSampler,
+    session: &mut Session,
+    last: &AtomicU64,
+    start: Instant,
+) -> io::Result<bool> {
+    let packet = match input {
+        Input::Udp { epoch, bin } => {
+            if session.armed && epoch == session.epoch {
+                // ADB is still the ordered backup for this same source sequence.
+                sampler.accept_bin(bin, Instant::now());
+            }
+            return Ok(true);
+        }
+        Input::Adb(packet) => packet,
+    };
+    let Some(packet) = packet? else {
+        return Ok(false);
+    };
+    // The writer owns the watchdog progress. A blocked UHID write must still time out.
+    last.store(start.elapsed().as_secs(), Ordering::Relaxed);
+    match packet {
+        Packet::Heartbeat { source_time_us } => {
+            sampler.observe_clock(source_time_us, Instant::now());
+        }
+        Packet::Stop => return Ok(false),
+        Packet::UdpKey(key) => {
+            if let Some(socket) = session.udp_socket.take() {
+                let _ = udp::start(socket, key, session.sender.clone());
+            }
+        }
+        Packet::Arm {
+            epoch,
+            control_id,
+            source_time_us,
+        } => {
+            sampler.reset();
+            sampler.observe_clock(source_time_us, Instant::now());
+            keyboard.report(&[0; 8])?;
+            mouse.report(&[0; 6])?;
+            session.epoch = epoch;
+            session.armed = true;
+            ack_control(control_id)?;
+        }
+        Packet::Release { epoch, control_id } => {
+            session.armed = false;
+            session.epoch = epoch;
+            sampler.reset();
+            keyboard.report(&[0; 8])?;
+            mouse.report(&[0; 6])?;
+            ack_control(control_id)?;
+        }
+        Packet::Keyboard { control_id, report } => {
+            if session.armed {
+                keyboard.report(&report)?;
+            }
+            ack_control(control_id)?;
+        }
+        Packet::Mouse {
+            control_id,
+            buttons,
+            dx,
+            dy,
+            wheel,
+            ..
+        } => {
+            if session.armed {
+                if let Some(output) = sampler.flush_at(Instant::now()) {
+                    emit_mouse(mouse, output)?;
+                }
+                let output = sampler.discrete(buttons, dx, dy, wheel);
+                emit_mouse(mouse, output)?;
+            }
+            ack_control(control_id)?;
+        }
+        Packet::MotionBin {
+            source_id,
+            sequence,
+            period_us,
+            source_time_us,
+            dx,
+            dy,
+        } => {
+            if session.armed {
+                sampler.accept_bin(
+                    MotionBin {
+                        source_id,
+                        sequence,
+                        period_us,
+                        source_time_us,
+                        dx,
+                        dy,
+                    },
+                    Instant::now(),
+                );
+            }
+        }
+    }
+    Ok(true)
+}
+
 fn run() -> io::Result<()> {
     let start = Instant::now();
     let last = Arc::new(AtomicU64::new(0));
@@ -81,19 +228,89 @@ fn run() -> io::Result<()> {
     });
     let mut keyboard = Device::create("ADB Input Keyboard", KEYBOARD, 1, 8)?;
     let mut mouse = Device::create("ADB Input Mouse", MOUSE, 2, 6)?;
-    println!("{READY}");
+    let udp_socket = udp::bind();
+    let udp_port = udp_socket
+        .as_ref()
+        .and_then(|socket| socket.local_addr().ok())
+        .map_or(0, |address| address.port());
+    println!("{READY} {udp_port}");
     io::stdout().flush()?;
-    let mut input = io::stdin().lock();
-    while let Some(packet) = Packet::read(&mut input)? {
-        last.store(start.elapsed().as_secs(), Ordering::Relaxed);
-        match packet {
-            Packet::Heartbeat => {}
-            Packet::Stop => break,
-            Packet::Keyboard(r) => keyboard.report(&r)?,
-            Packet::Mouse(r) => mouse.report(&r)?,
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn({
+        let sender = sender.clone();
+        move || read_input(sender)
+    });
+    let mut session = Session {
+        armed: false,
+        epoch: 0,
+        udp_socket,
+        sender,
+    };
+    let mut sampler = MotionSampler::default();
+    loop {
+        // Consume the whole currently available batch so that sampling sees
+        // its newest bin. Do not emit a stale early bin from an ADB burst.
+        loop {
+            match receiver.try_recv() {
+                Ok(packet) => {
+                    if !handle_input(
+                        packet,
+                        &mut keyboard,
+                        &mut mouse,
+                        &mut sampler,
+                        &mut session,
+                        &last,
+                        start,
+                    )? {
+                        return Ok(());
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "input reader stopped",
+                    ));
+                }
+            }
+        }
+        let now = Instant::now();
+        if let Some(output) = sampler.take_immediate(now) {
+            emit_mouse(&mut mouse, output)?;
+        }
+        if sampler.next_tick().is_some_and(|deadline| now >= deadline) {
+            if let Some(output) = sampler.tick(now) {
+                emit_mouse(&mut mouse, output)?;
+            }
+            continue;
+        }
+        let received = match sampler.next_tick() {
+            Some(deadline) => receiver.recv_timeout(deadline.saturating_duration_since(now)),
+            None => receiver.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        match received {
+            Ok(packet) => {
+                if !handle_input(
+                    packet,
+                    &mut keyboard,
+                    &mut mouse,
+                    &mut sampler,
+                    &mut session,
+                    &last,
+                    start,
+                )? {
+                    return Ok(());
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "input reader stopped",
+                ));
+            }
         }
     }
-    Ok(())
 }
 fn main() {
     if let Err(e) = run() {

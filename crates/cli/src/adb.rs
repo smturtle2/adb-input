@@ -1,4 +1,9 @@
 // SPDX-License-Identifier: EUPL-1.2
+use crate::{
+    clock::monotonic_us,
+    udp::{random_key, MotionUdp},
+};
+use adb_input_protocol::udp::Payload;
 use adb_input_protocol::{Packet, READY};
 use anyhow::{bail, Context, Result};
 use std::{
@@ -150,6 +155,12 @@ pub struct Connection {
     remote: String,
     child: Option<Child>,
     input: Option<ChildStdin>,
+    responses: Option<mpsc::Receiver<std::io::Result<String>>>,
+    udp: Option<MotionUdp>,
+    epoch: u64,
+    control_id: u64,
+    waiting_for: Option<u64>,
+    armed: bool,
 }
 impl Connection {
     pub fn start(adb: &Path, serial: &str, override_agent: Option<&Path>) -> Result<Self> {
@@ -180,6 +191,12 @@ impl Connection {
             remote: format!("/data/local/tmp/adb-input-{id}"),
             child: None,
             input: None,
+            responses: None,
+            udp: None,
+            epoch: 0,
+            control_id: 0,
+            waiting_for: None,
+            armed: false,
         };
         let temporary = std::env::temp_dir().join(format!("adb-input-{id}"));
         let source = if let Some(path) = override_agent {
@@ -223,20 +240,35 @@ impl Connection {
         connection.child = Some(child);
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let mut line = String::new();
-            use std::io::Read;
-            let result = BufReader::new(stdout)
-                .take(256)
-                .read_line(&mut line)
-                .map(|_| line);
-            let _ = tx.send(result);
+            let mut reader = BufReader::new(stdout);
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        if tx.send(Ok(line)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = tx.send(Err(error));
+                        break;
+                    }
+                }
+            }
         });
         let greeting = rx
             .recv_timeout(Duration::from_secs(8))
             .context("Android agent did not become ready")??;
-        if greeting.trim() != READY {
+        let Some(port) = greeting
+            .trim()
+            .strip_prefix(READY)
+            .and_then(|rest| rest.strip_prefix(' '))
+            .and_then(|port| port.parse::<u16>().ok())
+        else {
             bail!("unexpected Android agent response: {greeting:?}");
-        }
+        };
+        connection.responses = Some(rx);
         let fd = connection.input.as_ref().unwrap().as_raw_fd();
         unsafe {
             let flags = libc::fcntl(fd, libc::F_GETFL);
@@ -244,10 +276,68 @@ impl Connection {
                 return Err(std::io::Error::last_os_error().into());
             }
         }
-
+        connection.heartbeat()?;
+        if port != 0
+            && matches!(
+                serial.parse::<std::net::SocketAddr>(),
+                Ok(std::net::SocketAddr::V4(_))
+            )
+        {
+            if let Ok(key) = random_key() {
+                connection.send_raw(Packet::UdpKey(key))?;
+                connection.udp = MotionUdp::connect(serial, port, key).ok().flatten();
+            }
+        }
         Ok(connection)
     }
+    fn drain_responses(&mut self) {
+        let Some(responses) = &self.responses else {
+            return;
+        };
+        while let Ok(Ok(line)) = responses.try_recv() {
+            if let Some(id) = line
+                .trim()
+                .strip_prefix("ACK ")
+                .and_then(|id| id.parse::<u64>().ok())
+            {
+                if self.waiting_for.is_some_and(|waiting| id >= waiting) {
+                    self.waiting_for = None;
+                }
+            }
+        }
+    }
+
     pub fn send(&mut self, packet: Packet) -> Result<()> {
+        self.drain_responses();
+        if let Packet::MotionBin {
+            source_id,
+            sequence,
+            period_us,
+            source_time_us,
+            dx,
+            dy,
+        } = &packet
+        {
+            if self.armed && self.waiting_for.is_none() {
+                if let Some(udp) = &mut self.udp {
+                    udp.send_motion(
+                        self.epoch,
+                        Payload::MotionBin {
+                            source_id: *source_id,
+                            sequence: *sequence,
+                            period_us: *period_us,
+                            source_time_us: *source_time_us,
+                            dx: *dx,
+                            dy: *dy,
+                        },
+                    );
+                }
+            }
+        }
+        self.send_raw(packet)
+    }
+
+    fn send_raw(&mut self, packet: Packet) -> Result<()> {
         if let Some(status) = self.child.as_mut().unwrap().try_wait()? {
             bail!("ADB agent exited: {status}");
         }
@@ -267,12 +357,82 @@ impl Connection {
         }
         Ok(())
     }
+
+    fn send_control(
+        &mut self,
+        packet: impl FnOnce(u64, u64) -> Packet,
+        armed: bool,
+        new_epoch: bool,
+    ) -> Result<()> {
+        self.drain_responses();
+        self.control_id = self
+            .control_id
+            .checked_add(1)
+            .context("too many control packets")?;
+        if new_epoch {
+            self.epoch = self.epoch.checked_add(1).context("too many input modes")?;
+        }
+        self.armed = armed;
+        self.waiting_for = Some(self.control_id);
+        self.send_raw(packet(self.control_id, self.epoch))
+    }
+
+    pub fn arm(&mut self) -> Result<()> {
+        let source_time_us = monotonic_us()?;
+        self.send_control(
+            |control_id, epoch| Packet::Arm {
+                epoch,
+                control_id,
+                source_time_us,
+            },
+            true,
+            true,
+        )
+    }
+
+    pub fn keyboard(&mut self, report: [u8; 8]) -> Result<()> {
+        self.send_control(
+            |control_id, _| Packet::Keyboard { control_id, report },
+            self.armed,
+            false,
+        )
+    }
+
+    pub fn mouse(
+        &mut self,
+        buttons: u8,
+        dx: i32,
+        dy: i32,
+        wheel: i32,
+        source_id: u32,
+        source_time_us: u64,
+    ) -> Result<()> {
+        self.send_control(
+            |control_id, _| Packet::Mouse {
+                control_id,
+                buttons,
+                dx,
+                dy,
+                wheel,
+                source_id,
+                source_time_us,
+            },
+            self.armed,
+            false,
+        )
+    }
+
     pub fn heartbeat(&mut self) -> Result<()> {
-        self.send(Packet::Heartbeat)
+        self.send(Packet::Heartbeat {
+            source_time_us: monotonic_us()?,
+        })
     }
     pub fn release(&mut self) -> Result<()> {
-        self.send(Packet::Keyboard([0; 8]))?;
-        self.send(Packet::Mouse([0; 6]))
+        self.send_control(
+            |control_id, epoch| Packet::Release { epoch, control_id },
+            false,
+            true,
+        )
     }
 }
 impl Drop for Connection {

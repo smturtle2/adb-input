@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: EUPL-1.2
-use crate::{adb::Connection, keys};
-use adb_input_protocol::{keyboard_report, mouse_reports, Packet};
+use crate::{adb::Connection, clock::monotonic_us, keys};
+use adb_input_protocol::{keyboard_report, Packet};
 use anyhow::{bail, Context, Result};
 use evdev::{EventSummary, KeyCode, SynchronizationCode};
 
@@ -8,14 +8,85 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet},
     os::fd::AsRawFd,
     path::PathBuf,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, SyncSender, TryRecvError},
+    },
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
+mod bins;
 mod motion;
 mod source;
+use bins::MotionBin;
 pub use source::doctor;
 use source::{discover, Source};
+
+type DiscoveredSources = Vec<(PathBuf, Source)>;
+
+struct DiscoveryWorker {
+    requests: SyncSender<HashSet<PathBuf>>,
+    results: Receiver<DiscoveredSources>,
+    thread: JoinHandle<()>,
+    pending: bool,
+}
+
+impl DiscoveryWorker {
+    fn start() -> Result<Self> {
+        let (requests, request_rx) = mpsc::sync_channel::<HashSet<PathBuf>>(1);
+        let (result_tx, results) = mpsc::sync_channel(1);
+        let thread = thread::Builder::new()
+            .name("adb-input-discovery".into())
+            .spawn(move || {
+                while let Ok(known) = request_rx.recv() {
+                    let added = discover()
+                        .into_iter()
+                        .filter(|(path, _)| !known.contains(path))
+                        .collect();
+                    if result_tx.send(added).is_err() {
+                        break;
+                    }
+                }
+            })
+            .context("failed to start input discovery worker")?;
+        Ok(Self {
+            requests,
+            results,
+            thread,
+            pending: false,
+        })
+    }
+
+    fn request(&mut self, known: HashSet<PathBuf>) -> Result<()> {
+        if !self.pending {
+            self.requests
+                .try_send(known)
+                .context("failed to schedule input discovery")?;
+            self.pending = true;
+        }
+        Ok(())
+    }
+
+    fn take(&mut self) -> Result<Option<DiscoveredSources>> {
+        match self.results.try_recv() {
+            Ok(sources) => {
+                self.pending = false;
+                Ok(Some(sources))
+            }
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => bail!("input discovery worker stopped"),
+        }
+    }
+
+    fn stop(self) -> Result<()> {
+        drop(self.requests);
+        drop(self.results);
+        self.thread
+            .join()
+            .map_err(|_| anyhow::anyhow!("input discovery worker panicked"))
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -27,14 +98,26 @@ pub enum Mode {
 
 pub struct Desktop {
     sources: HashMap<PathBuf, Source>,
+    next_source_id: u32,
     held: HashMap<PathBuf, BTreeSet<u16>>,
     mode: Mode,
     sensitivity: f64,
+    last_buttons: u8,
     notice: Option<String>,
 }
 impl Desktop {
     pub fn new(sensitivity: f64) -> Result<Self> {
-        let sources: HashMap<_, _> = discover().into_iter().collect();
+        let mut next_source_id = 1u32;
+        let sources: HashMap<_, _> = discover()
+            .into_iter()
+            .map(|(path, mut source)| {
+                source.id = next_source_id;
+                next_source_id = next_source_id
+                    .checked_add(1)
+                    .context("too many input sources")?;
+                Ok((path, source))
+            })
+            .collect::<Result<_>>()?;
         if !sources.values().any(|s| s.keyboard) || !sources.values().any(|s| s.pointer) {
             bail!(
                 "cannot read keyboard and pointer input; run adb-input doctor to check permissions"
@@ -42,9 +125,11 @@ impl Desktop {
         }
         Ok(Self {
             sources,
+            next_source_id,
             held: HashMap::new(),
             mode: Mode::Local,
             sensitivity,
+            last_buttons: 0,
             notice: None,
         })
     }
@@ -60,6 +145,7 @@ impl Desktop {
         }
         self.mode = Mode::Local;
         self.held.clear();
+        self.last_buttons = 0;
     }
     fn activate(&mut self) -> Result<()> {
         for source in self.sources.values_mut() {
@@ -74,6 +160,7 @@ impl Desktop {
             bail!("no capturable keyboard/pointer pair; input is still on the desktop");
         }
         self.mode = Mode::Remote;
+        self.last_buttons = 0;
 
         Ok(())
     }
@@ -96,17 +183,64 @@ impl Desktop {
         running: &AtomicBool,
         observer: &mut dyn FnMut(Mode, Option<String>) -> Result<bool>,
     ) -> Result<()> {
-        let result = self.event_loop(connection, running, observer);
+        let mut discovery = match DiscoveryWorker::start() {
+            Ok(discovery) => discovery,
+            Err(error) => {
+                self.release_local();
+                let _ = connection.release();
+                return Err(error);
+            }
+        };
+        let result = self.event_loop(connection, running, observer, &mut discovery);
         // Restore the desktop before any potentially slow ADB shutdown/cleanup.
         self.release_local();
         let _ = connection.release();
-        result
+        result.and(discovery.stop())
     }
+    fn flush_bins(&mut self, connection: &mut Connection, now_us: u64, force: bool) -> Result<()> {
+        if self.mode != Mode::Remote {
+            return Ok(());
+        }
+        let mut ready = Vec::new();
+        for source in self.sources.values_mut().filter(|source| source.grabbed) {
+            let bin = if force {
+                source.bins.take_now(now_us)
+            } else {
+                source.bins.take_due(now_us)
+            };
+            if let Some(bin) = bin {
+                ready.push((source.id, bin));
+            }
+        }
+        ready.sort_unstable_by_key(|(source_id, bin)| (bin.source_time_us, *source_id));
+        for (source_id, bin) in ready {
+            send_bin(connection, source_id, bin)?;
+        }
+        Ok(())
+    }
+
+    fn next_poll_timeout_ms(&self, now_us: u64) -> i32 {
+        if self.mode != Mode::Remote {
+            return 25;
+        }
+        let wait_us = self
+            .sources
+            .values()
+            .filter(|source| source.grabbed)
+            .filter_map(|source| source.bins.next_due_us())
+            .map(|due| due.saturating_sub(now_us))
+            .min();
+        wait_us
+            .map(|us| us.div_ceil(1_000).min(25) as i32)
+            .unwrap_or(25)
+    }
+
     fn event_loop(
         &mut self,
         connection: &mut Connection,
         running: &AtomicBool,
         observer: &mut dyn FnMut(Mode, Option<String>) -> Result<bool>,
+        discovery: &mut DiscoveryWorker,
     ) -> Result<()> {
         let mut scan = Instant::now();
         let mut heartbeat = Instant::now();
@@ -118,18 +252,27 @@ impl Desktop {
                 connection.heartbeat()?;
                 heartbeat = Instant::now();
             }
-            if scan.elapsed() >= Duration::from_secs(1) {
-                for (path, mut source) in discover() {
+            if let Some(sources) = discovery.take()? {
+                for (path, mut source) in sources {
                     if self.sources.contains_key(&path) {
                         continue;
                     }
+                    source.id = self.next_source_id;
+                    self.next_source_id = self
+                        .next_source_id
+                        .checked_add(1)
+                        .context("too many input sources")?;
                     if self.mode == Mode::Remote {
                         source.grabbed = source.device.grab().is_ok();
                     }
                     self.sources.insert(path, source);
                 }
+            }
+            if scan.elapsed() >= Duration::from_secs(1) {
+                discovery.request(self.sources.keys().cloned().collect())?;
                 scan = Instant::now();
             }
+            let now_us = monotonic_us()?;
             let paths: Vec<_> = self.sources.keys().cloned().collect();
             let mut polls: Vec<_> = paths
                 .iter()
@@ -139,7 +282,9 @@ impl Desktop {
                     revents: 0,
                 })
                 .collect();
-            let n = unsafe { libc::poll(polls.as_mut_ptr(), polls.len() as libc::nfds_t, 25) };
+            let timeout_ms = self.next_poll_timeout_ms(now_us);
+            let n =
+                unsafe { libc::poll(polls.as_mut_ptr(), polls.len() as libc::nfds_t, timeout_ms) };
             if n < 0 {
                 if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
                     continue;
@@ -202,8 +347,9 @@ impl Desktop {
                             }
                             if self.all_up() {
                                 if self.mode == Mode::Arming {
-                                    if let Err(e) = self.activate() {
-                                        self.notice = Some(e.to_string());
+                                    match self.activate() {
+                                        Ok(()) => connection.arm()?,
+                                        Err(error) => self.notice = Some(error.to_string()),
                                     }
                                     continue;
                                 }
@@ -222,7 +368,7 @@ impl Desktop {
                                     .flat_map(|(_, keys)| {
                                         keys.iter().filter_map(|k| keys::usage(*k))
                                     });
-                                connection.send(Packet::Keyboard(keyboard_report(usages)))?;
+                                connection.keyboard(keyboard_report(usages))?;
                             }
                             continue;
                         }
@@ -235,21 +381,61 @@ impl Desktop {
                     if !source.grabbed || !source.pointer {
                         continue;
                     }
-                    if let Some((x, y, wheel)) = source.motion.update(event, self.sensitivity) {
+                    if let Some(motion) = source.motion.update(event, self.sensitivity) {
+                        let source_id = source.id;
+                        let source_time_us = source.timestamp_us(event)?;
+                        let now_us = monotonic_us()?;
                         let buttons = self
                             .sources
                             .values()
                             .filter(|s| s.grabbed)
                             .fold(0, |buttons, source| buttons | source.motion.buttons);
-                        for packet in mouse_reports(buttons, x, y, wheel) {
-                            connection.send(packet)?;
+                        if buttons != self.last_buttons || motion.wheel != 0 {
+                            self.flush_bins(connection, now_us, true)?;
+                            self.sources
+                                .get_mut(path)
+                                .context("input source removed")?
+                                .bins
+                                .note_discrete(source_time_us);
+                            connection.mouse(
+                                buttons,
+                                motion.x,
+                                motion.y,
+                                motion.wheel,
+                                source_id,
+                                source_time_us,
+                            )?;
+                            self.last_buttons = buttons;
+                        } else if motion.x != 0 || motion.y != 0 {
+                            let bin = self
+                                .sources
+                                .get_mut(path)
+                                .context("input source removed")?
+                                .bins
+                                .accept(motion.x, motion.y, source_time_us, now_us);
+                            if let Some(bin) = bin {
+                                send_bin(connection, source_id, bin)?;
+                            }
                         }
                     }
                 }
             }
+            // Read every ready evdev report before closing a due interval.
+            // The kernel may already hold a later report for that same bin.
+            self.flush_bins(connection, monotonic_us()?, false)?;
         }
         Ok(())
     }
+}
+fn send_bin(connection: &mut Connection, source_id: u32, bin: MotionBin) -> Result<()> {
+    connection.send(Packet::MotionBin {
+        source_id,
+        sequence: bin.sequence,
+        period_us: bin.period_us,
+        source_time_us: bin.source_time_us,
+        dx: bin.dx,
+        dy: bin.dy,
+    })
 }
 impl Drop for Desktop {
     fn drop(&mut self) {

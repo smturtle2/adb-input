@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: EUPL-1.2
 mod adb;
+mod clock;
 mod control;
 mod input;
 mod interactive;
 mod keys;
 mod terminal;
+mod udp;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use control::Control;
