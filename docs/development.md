@@ -49,6 +49,8 @@ and ARM64 Linux hosts have not received interactive hardware testing yet.
 ## Workspace
 
 - `crates/cli`: commands, terminal UI, ADB lifecycle and desktop input.
+  - `devices.rs`: saved wireless destinations, address validation and atomic state storage.
+  - `interactive/connections.rs`: pairing, port-first reconnect forms and saved-device management.
   - `input/mod.rs`: input switching, held keys, event loop and forwarding.
   - `input/source.rs`: evdev discovery, capabilities and device grabs.
   - `input/motion.rs`: pointer buttons, relative/absolute movement and report boundaries.

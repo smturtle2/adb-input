@@ -2,6 +2,7 @@
 mod adb;
 mod clock;
 mod control;
+mod devices;
 mod input;
 mod interactive;
 mod keys;
@@ -67,6 +68,21 @@ fn forward(adb: &std::path::Path, args: &[&str]) -> Result<()> {
     }
     Ok(())
 }
+fn remember_destination(adb: &std::path::Path, address: &str, pairing: bool) {
+    let Some(endpoint) = devices::Endpoint::parse(address) else {
+        return;
+    };
+    let mut saved = devices::SavedDevices::open();
+    let model = if pairing {
+        None
+    } else {
+        adb::connection_info(adb, address).model
+    };
+    saved.remember(endpoint.host, (!pairing).then_some(endpoint.port), model);
+    if let Some(warning) = saved.warning {
+        eprintln!("{warning}");
+    }
+}
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let control = Control::new()?;
@@ -74,9 +90,14 @@ fn run() -> Result<()> {
         return interactive::run(&cli.adb, &control);
     };
     match command {
-        Action::Pair { address } => forward(&cli.adb, &["pair", &address]),
+        Action::Pair { address } => {
+            forward(&cli.adb, &["pair", &address])?;
+            remember_destination(&cli.adb, &address, true);
+            Ok(())
+        }
         Action::Connect { address } => {
             adb::connect(&cli.adb, &address)?;
+            remember_destination(&cli.adb, &address, false);
             Ok(())
         }
         Action::Devices => forward(&cli.adb, &["devices", "-l"]),
@@ -107,6 +128,7 @@ fn run() -> Result<()> {
                 }
                 None => adb::select(&cli.adb, device)?,
             };
+            remember_destination(&cli.adb, &serial, false);
             control.session(&cli.adb, &serial, agent.as_deref(), sensitivity)
         }
     }

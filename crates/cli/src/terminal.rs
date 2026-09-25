@@ -17,6 +17,7 @@ pub enum Key {
     Delete,
     Backspace,
     Enter,
+    Tab,
     Escape,
     Interrupt,
     Char(char),
@@ -77,6 +78,7 @@ impl Decoder {
             3 => Key::Interrupt,
             4 => Key::Interrupt,
             10 | 13 => Key::Enter,
+            9 => Key::Tab,
             8 | 127 => Key::Backspace,
             1 => Key::Home,
             5 => Key::End,
@@ -331,19 +333,55 @@ pub fn clip(text: &str, width: usize) -> String {
 pub struct Editor {
     pub text: Vec<char>,
     pub cursor: usize,
+    selected: bool,
 }
 impl Editor {
+    pub fn selected(value: &str) -> Self {
+        let text: Vec<_> = value.chars().collect();
+        Self {
+            cursor: text.len(),
+            selected: !text.is_empty(),
+            text,
+        }
+    }
     pub fn value(&self) -> String {
         self.text.iter().collect()
     }
     pub fn key(&mut self, key: Key) {
+        if self.selected {
+            match &key {
+                Key::Char(c) if c.is_ascii() && !c.is_control() => {
+                    self.text.clear();
+                    self.cursor = 0;
+                    self.selected = false;
+                }
+                Key::Paste(_) => {} // first printable pasted character replaces the selection
+                Key::Delete | Key::Backspace => {
+                    self.text.clear();
+                    self.cursor = 0;
+                    self.selected = false;
+                    return;
+                }
+                Key::Left | Key::Home => {
+                    self.cursor = 0;
+                    self.selected = false;
+                    return;
+                }
+                Key::Right | Key::End => {
+                    self.cursor = self.text.len();
+                    self.selected = false;
+                    return;
+                }
+                _ => {}
+            }
+        }
         match key {
-            Key::Char(c) if c.is_ascii_graphic() && self.text.len() < 256 => {
+            Key::Char(c) if c.is_ascii() && !c.is_control() && self.text.len() < 256 => {
                 self.text.insert(self.cursor, c);
                 self.cursor += 1;
             }
             Key::Paste(s) => {
-                for c in s.chars().filter(char::is_ascii_graphic) {
+                for c in s.chars().filter(|c| c.is_ascii() && !c.is_control()) {
                     self.key(Key::Char(c));
                 }
             }
@@ -362,6 +400,14 @@ impl Editor {
         }
     }
     pub fn display(&self, masked: bool, width: usize) -> String {
+        if self.selected {
+            let value = if masked {
+                "*".repeat(self.text.len())
+            } else {
+                self.value()
+            };
+            return clip(&format!("[{value}]"), width);
+        }
         let start = self.cursor.saturating_sub(width.saturating_sub(2));
         let mut output = String::new();
         for index in start..=self.text.len() {
@@ -396,5 +442,13 @@ mod tests {
         decoder.push(b"\x1b");
         assert_eq!(decoder.next(true), Some(Key::Escape));
         assert_eq!(clip("bad\x1b[2J\n", 20), "bad?[2J?");
+        let mut selected = Editor::selected("5555");
+        assert_eq!(selected.display(false, 20), "[5555]");
+        selected.key(Key::Paste("43210".into()));
+        assert_eq!(selected.value(), "43210");
+        let mut selected = Editor::selected("5555");
+        selected.key(Key::Left);
+        selected.key(Key::Delete);
+        assert_eq!(selected.value(), "555");
     }
 }

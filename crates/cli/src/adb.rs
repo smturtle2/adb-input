@@ -129,6 +129,17 @@ pub struct DeviceInfo {
 pub fn devices(adb: &Path) -> Result<Vec<DeviceInfo>> {
     Ok(parse_devices(&output(adb, None, &["devices", "-l"])?))
 }
+pub fn connection_info(adb: &Path, serial: &str) -> DeviceInfo {
+    devices(adb)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|device| device.serial == serial && device.state == "device")
+        .unwrap_or(DeviceInfo {
+            serial: serial.into(),
+            state: "device".into(),
+            model: None,
+        })
+}
 fn parse_devices(text: &str) -> Vec<DeviceInfo> {
     text.lines()
         .filter_map(|line| {

@@ -42,6 +42,7 @@ adb-input
 ```
 
 Select a device and choose **Start control**. Input starts on **DESKTOP**.
+Wireless destinations are remembered; choose one later and enter only its new port.
 Press and release **Ctrl+Shift+R** to switch to **PHONE**, and again to return.
 Release all held keys when switching. **Ctrl+C** or **Esc** in desktop mode returns
 to the menu. Opening the menu alone does not capture input.

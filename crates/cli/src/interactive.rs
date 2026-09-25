@@ -3,8 +3,9 @@
 use crate::{
     adb,
     control::Control,
+    devices::{Endpoint, SavedDevice, SavedDevices},
     input,
-    terminal::{Editor, Key, Line, Screen, Style, Terminal},
+    terminal::{Key, Line, Screen, Style, Terminal},
 };
 use anyhow::{bail, Result};
 use std::{
@@ -12,6 +13,9 @@ use std::{
     sync::mpsc,
     time::{Duration, Instant},
 };
+mod connections;
+use connections::{connect_form, connect_saved, manage_saved};
+
 const TICK: Duration = Duration::from_millis(60);
 fn line(text: impl Into<String>, style: Style) -> Line {
     Line::new(text, style)
@@ -167,158 +171,6 @@ fn select(
         }
     }
 }
-fn address_valid(value: &str) -> bool {
-    value.rsplit_once(':').is_some_and(|(host, port)| {
-        !host.is_empty() && port.parse::<u16>().is_ok_and(|port| port > 0)
-    })
-}
-fn form(
-    terminal: &mut Terminal,
-    control: &Control,
-    copy: (&str, &str, &str),
-    editor: &mut Editor,
-    masked: bool,
-    error: &str,
-) -> Result<Option<String>> {
-    let (title, label, help) = copy;
-    let mut validation = error.to_owned();
-    loop {
-        if control.is_shutdown() {
-            return Ok(None);
-        }
-        let width = terminal.size().0.saturating_sub(6);
-        let mut lines = vec![
-            line(title, Style::Strong),
-            line("", Style::Normal),
-            line(label, Style::Muted),
-            line(editor.display(masked, width), Style::Accent),
-        ];
-        if terminal.size().1 < 12 {
-            lines = vec![
-                line(title, Style::Strong),
-                line(editor.display(masked, width), Style::Accent),
-            ];
-        }
-        if terminal.size().1 >= 15 {
-            lines.push(line(help, Style::Muted));
-            lines.push(line("", Style::Normal));
-        }
-        if !validation.is_empty() {
-            lines.push(line(&validation, Style::Error));
-        }
-        terminal.draw(Screen {
-            lines,
-            footer: if terminal.size().0 < 50 {
-                "Enter OK   Esc Back"
-            } else {
-                "Enter Continue   Esc Back   Left/Right Edit"
-            }
-            .into(),
-        })?;
-        match terminal.key(TICK)? {
-            Some(Key::Escape | Key::Interrupt) => return Ok(None),
-            Some(Key::Enter) => {
-                let value = editor.value();
-                let valid = if masked {
-                    value.len() == 6 && value.bytes().all(|b| b.is_ascii_digit())
-                } else {
-                    address_valid(&value)
-                };
-                if valid {
-                    return Ok(Some(value));
-                }
-                validation = if masked {
-                    "Enter the 6-digit pairing code."
-                } else {
-                    "Enter an address and port, for example 192.168.1.2:5555."
-                }
-                .into();
-            }
-            Some(key) => editor.key(key),
-            _ => {}
-        }
-    }
-}
-fn connect_form(
-    terminal: &mut Terminal,
-    control: &Control,
-    adb: &Path,
-    pairing: bool,
-) -> Result<Option<String>> {
-    let mut address = Editor::default();
-    let mut code = Editor::default();
-    let mut error = String::new();
-    loop {
-        let Some(endpoint) = form(
-            terminal,
-            control,
-            (
-                if pairing {
-                    "Pair wireless debugging"
-                } else {
-                    "Connect a device"
-                },
-                "Address",
-                if pairing {
-                    "Use the pairing address shown on your phone."
-                } else {
-                    "Use the connection port, not the pairing port."
-                },
-            ),
-            &mut address,
-            false,
-            &error,
-        )?
-        else {
-            return Ok(None);
-        };
-        let pin = if pairing {
-            let Some(pin) = form(
-                terminal,
-                control,
-                (
-                    "Pair wireless debugging",
-                    "Pairing code",
-                    "Enter the code displayed on your phone.",
-                ),
-                &mut code,
-                true,
-                "",
-            )?
-            else {
-                continue;
-            };
-            Some(pin)
-        } else {
-            None
-        };
-        let path = adb.to_owned();
-        let target = endpoint.clone();
-        let result = task(
-            terminal,
-            control,
-            if pairing {
-                "Pairing device"
-            } else {
-                "Connecting device"
-            },
-            move || {
-                if let Some(code) = pin {
-                    adb::pair(&path, &target, &code)
-                } else {
-                    adb::connect(&path, &target)
-                }
-            },
-        );
-        match result {
-            Ok(()) => return Ok(Some(endpoint)),
-            Err(e) => error = format!("{e:#}"),
-        }
-        if control.is_shutdown() {
-            return Ok(None);
-        }
-    }
-}
 fn session(
     terminal: &mut Terminal,
     control: &Control,
@@ -364,40 +216,144 @@ fn session(
     })
 }
 
+fn saved_info(saved: &SavedDevice) -> adb::DeviceInfo {
+    adb::DeviceInfo {
+        serial: saved.address().unwrap_or_else(|| saved.host.clone()),
+        state: "saved".into(),
+        model: Some(saved.name().into()),
+    }
+}
+
+fn device_host(device: &adb::DeviceInfo) -> Option<String> {
+    Endpoint::parse(&device.serial)
+        .map(|endpoint| endpoint.host)
+        .or_else(|| (device.state == "saved").then(|| device.serial.clone()))
+}
+
+fn choices(online: Vec<adb::DeviceInfo>, saved: &SavedDevices) -> Vec<adb::DeviceInfo> {
+    let mut result: Vec<_> = online
+        .into_iter()
+        .filter(|device| {
+            device.state == "device"
+                || device_host(device).is_none_or(|host| saved.find(&host).is_none())
+        })
+        .collect();
+    for device in &mut result {
+        if let Some(entry) = device_host(device).and_then(|host| saved.find(&host)) {
+            if let Some(label) = &entry.label {
+                device.model = Some(label.clone());
+            }
+        }
+    }
+    for entry in &saved.entries {
+        if !result.iter().any(|device| {
+            device.state == "device" && device_host(device).as_deref() == Some(&entry.host)
+        }) {
+            result.push(saved_info(entry));
+        }
+    }
+    result.sort_by_key(|device| {
+        let recent = device_host(device)
+            .and_then(|host| saved.entries.iter().position(|entry| entry.host == host))
+            .unwrap_or(usize::MAX);
+        (device.state != "device", recent)
+    });
+    result
+}
+
+fn remember_device(saved: &mut SavedDevices, device: &adb::DeviceInfo) {
+    if let Some(endpoint) = Endpoint::parse(&device.serial) {
+        saved.remember(endpoint.host, Some(endpoint.port), device.model.clone());
+    }
+}
+
+fn saved_notice(saved: &SavedDevices, message: &str) -> String {
+    match &saved.warning {
+        Some(warning) => format!("{message} {warning}"),
+        None => message.into(),
+    }
+}
+
+fn reconnect_entry(device: &adb::DeviceInfo, saved: &SavedDevices) -> Option<SavedDevice> {
+    if let Some(entry) = device_host(device).and_then(|host| saved.find(&host)) {
+        return Some(entry.clone());
+    }
+    let endpoint = Endpoint::parse(&device.serial)?;
+    Some(SavedDevice {
+        host: endpoint.host,
+        port: Some(endpoint.port),
+        label: None,
+        model: device.model.clone(),
+    })
+}
+
+fn preferred(devices: &[adb::DeviceInfo]) -> Option<adb::DeviceInfo> {
+    devices
+        .iter()
+        .find(|d| d.state == "device")
+        .or_else(|| devices.iter().find(|d| d.state == "saved"))
+        .or_else(|| devices.first())
+        .cloned()
+}
+
+fn retain_choice(
+    previous: Option<adb::DeviceInfo>,
+    devices: &[adb::DeviceInfo],
+) -> Option<adb::DeviceInfo> {
+    previous
+        .and_then(|previous| {
+            devices
+                .iter()
+                .find(|device| device.serial == previous.serial)
+                .or_else(|| {
+                    device_host(&previous).and_then(|host| {
+                        devices
+                            .iter()
+                            .find(|device| device_host(device).as_deref() == Some(&host))
+                    })
+                })
+                .cloned()
+        })
+        .or_else(|| preferred(devices))
+}
+
 pub fn run(adb: &Path, control: &Control) -> Result<()> {
     let mut terminal = Terminal::enter()?;
-    let mut notice = String::new();
-    let mut notice_error = false;
-    let mut devices = match refresh(&mut terminal, control, adb) {
-        Ok(devices) => devices,
-        Err(e) => {
-            notice = format!("{e:#}");
-            notice_error = true;
-            Vec::new()
-        }
-    };
-    let mut chosen = devices.iter().find(|d| d.state == "device").cloned();
+    let mut saved = SavedDevices::open();
+    let mut notice = saved.warning.clone().unwrap_or_default();
+    let mut notice_error = saved.warning.is_some();
+    let mut devices = choices(
+        match refresh(&mut terminal, control, adb) {
+            Ok(devices) => devices,
+            Err(error) => {
+                notice = format!("{error:#}");
+                notice_error = true;
+                Vec::new()
+            }
+        },
+        &saved,
+    );
+    let mut chosen = preferred(&devices);
     let mut selected = 0;
     loop {
         if control.is_shutdown() {
             return Ok(());
         }
         let reconnect = chosen.as_ref().is_some_and(|d| d.state != "device");
-        let items: Vec<String> = [
+        let items = [
             if reconnect {
                 "Reconnect"
             } else {
                 "Start control"
             },
-            "Change device",
+            "Choose device",
             "Connect another device",
             "Pair wireless debugging",
             "Refresh devices",
+            "Manage saved devices",
             "Exit",
         ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+        .map(String::from);
         menu(
             &mut terminal,
             "DEVICE",
@@ -424,22 +380,28 @@ pub fn run(adb: &Path, control: &Control) -> Result<()> {
         let result = (|| -> Result<()> {
             match selected {
                 0 => {
-                    if let Some(device) = chosen.as_mut() {
-                        if reconnect {
-                            if !address_valid(&device.serial) {
-                                bail!("Reconnect the USB cable and approve debugging, then refresh devices.");
-                            }
-                            let path = adb.to_owned();
-                            let serial = device.serial.clone();
-                            task(&mut terminal, control, "Reconnecting", move || {
-                                adb::connect(&path, &serial)
-                            })?;
-                            device.state = "device".into();
+                    if reconnect {
+                        let entry = chosen.as_ref().and_then(|device| reconnect_entry(device, &saved))
+                            .ok_or_else(|| anyhow::anyhow!("Reconnect the USB cable and approve debugging, then refresh devices."))?;
+                        if let Some(device) =
+                            connect_saved(&mut terminal, control, adb, &entry, &mut saved)?
+                        {
+                            chosen = Some(device);
+                            notice =
+                                saved_notice(&saved, "Connected. Select Start control when ready.");
                         }
+                        return Ok(());
+                    }
+                    if let Some(device) = chosen.as_mut() {
+                        remember_device(&mut saved, device);
                         match session(&mut terminal, control, adb, device) {
-                            Ok(()) => notice = "Input stopped. Desktop controls restored.".into(),
-                            Err(e) => {
-                                // Preserve selection for retry, but only offer reconnect when ADB is offline.
+                            Ok(()) => {
+                                notice = saved_notice(
+                                    &saved,
+                                    "Input stopped. Desktop controls restored.",
+                                )
+                            }
+                            Err(error) => {
                                 if !adb::devices(adb)
                                     .unwrap_or_default()
                                     .iter()
@@ -447,16 +409,16 @@ pub fn run(adb: &Path, control: &Control) -> Result<()> {
                                 {
                                     device.state = "offline".into();
                                 }
-                                return Err(e);
+                                return Err(error);
                             }
                         }
                     } else {
-                        notice = "Connect or select an online device first.".into();
+                        notice = "Connect or select a saved device first.".into();
                         selected = 2;
                     }
                 }
                 1 => {
-                    devices = refresh(&mut terminal, control, adb)?;
+                    devices = choices(refresh(&mut terminal, control, adb)?, &saved);
                     let labels: Vec<_> = devices
                         .iter()
                         .map(|d| format!("{} / {} / {}", caption(d), d.serial, d.state))
@@ -466,48 +428,82 @@ pub fn run(adb: &Path, control: &Control) -> Result<()> {
                     } else if let Some(index) =
                         select(&mut terminal, control, "Choose device", &labels)?
                     {
-                        chosen = Some(devices[index].clone());
+                        let device = devices[index].clone();
+                        if device.state != "device" {
+                            if let Some(entry) = reconnect_entry(&device, &saved) {
+                                chosen = Some(device);
+                                if let Some(connected) =
+                                    connect_saved(&mut terminal, control, adb, &entry, &mut saved)?
+                                {
+                                    chosen = Some(connected);
+                                    notice = saved_notice(
+                                        &saved,
+                                        "Connected. Select Start control when ready.",
+                                    );
+                                }
+                            } else {
+                                chosen = Some(device);
+                            }
+                        } else {
+                            remember_device(&mut saved, &device);
+                            chosen = Some(device);
+                            notice = saved_notice(&saved, "Device selected.");
+                        }
                         selected = 0;
-                        notice.clear();
                     }
                 }
                 2 | 3 => {
-                    if let Some(endpoint) =
-                        connect_form(&mut terminal, control, adb, selected == 3)?
-                    {
-                        if selected == 3 {
-                            notice = "Paired. Connect using the phone's connection port.".into();
-                            selected = 2;
+                    let pairing = selected == 3;
+                    if let Some(address) = connect_form(&mut terminal, control, adb, pairing)? {
+                        let endpoint = Endpoint::parse(&address).expect("validated endpoint");
+                        if pairing {
+                            saved.remember(endpoint.host.clone(), None, None);
+                            let entry = saved.find(&endpoint.host).expect("just saved").clone();
+                            chosen = Some(saved_info(&entry));
+                            notice = saved_notice(
+                                &saved,
+                                "Paired. Enter the connection port when ready.",
+                            );
+                            if let Some(device) =
+                                connect_saved(&mut terminal, control, adb, &entry, &mut saved)?
+                            {
+                                chosen = Some(device);
+                                notice = saved_notice(
+                                    &saved,
+                                    "Connected. Select Start control when ready.",
+                                );
+                            }
                         } else {
-                            devices = refresh(&mut terminal, control, adb)?;
-                            chosen = devices
-                                .iter()
-                                .find(|d| d.serial == endpoint)
-                                .cloned()
-                                .or_else(|| devices.iter().find(|d| d.state == "device").cloned());
-                            selected = 0;
-                            notice.clear();
+                            let path = adb.to_owned();
+                            let device =
+                                task(&mut terminal, control, "Checking device", move || {
+                                    Ok(adb::connection_info(&path, &address))
+                                })?;
+                            remember_device(&mut saved, &device);
+                            chosen = Some(device);
+                            notice =
+                                saved_notice(&saved, "Connected. Select Start control when ready.");
                         }
+                        selected = 0;
                     }
                 }
                 4 => {
-                    devices = refresh(&mut terminal, control, adb)?;
-                    chosen = chosen
-                        .take()
-                        .map(|mut previous| {
-                            if let Some(current) =
-                                devices.iter().find(|d| d.serial == previous.serial)
-                            {
-                                current.clone()
-                            } else {
-                                previous.state = "offline".into();
-                                previous
-                            }
-                        })
-                        .or_else(|| devices.iter().find(|d| d.state == "device").cloned());
-                    notice = format!("{} device(s) found.", devices.len());
+                    devices = choices(refresh(&mut terminal, control, adb)?, &saved);
+                    chosen = retain_choice(chosen.take(), &devices);
+                    notice = saved_notice(
+                        &saved,
+                        &format!(
+                            "{} device(s) found, including saved devices.",
+                            devices.len()
+                        ),
+                    );
                 }
-                5 => control.shutdown(),
+                5 => {
+                    notice = manage_saved(&mut terminal, control, &mut saved)?;
+                    devices = choices(refresh(&mut terminal, control, adb)?, &saved);
+                    chosen = retain_choice(chosen.take(), &devices);
+                }
+                6 => control.shutdown(),
                 _ => {}
             }
             Ok(())
@@ -515,18 +511,6 @@ pub fn run(adb: &Path, control: &Control) -> Result<()> {
         if let Err(error) = result {
             notice = format!("{error:#}");
             notice_error = true;
-        }
-    }
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn address_validation_handles_ipv4_ipv6_and_bad_ports() {
-        assert!(address_valid("host.example:5555"));
-        assert!(address_valid("[::1]:12345"));
-        for value in ["", ":5555", "host:0", "host:99999", "host"] {
-            assert!(!address_valid(value));
         }
     }
 }

@@ -37,11 +37,30 @@ adb-input
 
 The UI uses the alternate screen. Use the arrow keys or `j`/`k` to select an item and
 press Enter to confirm; Esc goes back or quits. The home screen shows the selected
-connected device and offers Start, Change device, Connect another device, Pair
-wireless debugging, Refresh devices, and Exit. Device selection shows each device's
+connected device and offers Start, Choose device, Connect another device, Pair
+wireless debugging, Refresh devices, Manage saved devices, and Exit. Device selection shows each device's
 model and connection state. Connection addresses and pairing codes can be edited in
 their forms; pairing codes are masked, and errors appear inline while entered values
 are preserved. Nothing is captured merely by opening the UI.
+
+Successful wireless connections and pairing remember the host across restarts,
+including when using `connect`, `pair`, or `run --connect` from the command line.
+Choose a saved device to open its connection form, or use **Reconnect** for the
+last selected saved device. The last connection port is selected: type the new
+port to replace it, or press Enter to reuse it. Tab switches between the host and
+port fields. Successful connection returns to **Start control**.
+
+**Manage saved devices** lets you rename a device, edit its IP/hostname, or remove
+it from the list. Removing an entry does not revoke ADB pairing. Entries are ordered
+by recent use and a new port updates the same host entry. After pairing, the host
+is kept and the connection-port form opens directly; pairing ports and codes are
+never saved as connection details. Saved entries are history, not confirmation that
+Android still authorizes this computer.
+
+Records are stored in `$XDG_STATE_HOME/adb-input/devices.json` (default:
+`~/.local/state/adb-input/devices.json`). Saving is atomic and shared between CLI
+and UI instances. If the file cannot be read or saved, a warning is shown and the
+app remains usable; unreadable or invalid existing data is preserved.
 
 During a session, the UI shows the current **DESKTOP** or **PHONE** mode and the
 Ctrl+Shift+R shortcut. Ctrl+C or Esc in DESKTOP mode stops the session and returns to
