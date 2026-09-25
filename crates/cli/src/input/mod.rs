@@ -168,7 +168,7 @@ impl Desktop {
         let mut last = None;
         self.run_observed(connection, running, &mut |mode, notice| {
             if last != Some(mode) {
-                eprintln!("{mode:?} — Ctrl+Shift+R switches input; Ctrl+C stops.");
+                eprintln!("{mode:?} — Ctrl+; switches input; Ctrl+C stops.");
                 last = Some(mode);
             }
             if let Some(message) = notice {
@@ -335,7 +335,7 @@ impl Desktop {
                             } else {
                                 held.remove(&code);
                             }
-                            if value == 1 && key == KeyCode::KEY_R && self.chord() {
+                            if value == 1 && key == KeyCode::KEY_SEMICOLON && self.chord() {
                                 match self.mode {
                                     Mode::Local => self.mode = Mode::Arming,
                                     Mode::Remote => {
@@ -444,20 +444,46 @@ impl Drop for Desktop {
 }
 fn chord(keys: impl IntoIterator<Item = u16>) -> bool {
     let keys: HashSet<_> = keys.into_iter().collect();
-    keys.contains(&KeyCode::KEY_R.0)
+    keys.contains(&KeyCode::KEY_SEMICOLON.0)
         && (keys.contains(&KeyCode::KEY_LEFTCTRL.0) || keys.contains(&KeyCode::KEY_RIGHTCTRL.0))
-        && (keys.contains(&KeyCode::KEY_LEFTSHIFT.0) || keys.contains(&KeyCode::KEY_RIGHTSHIFT.0))
+        && !keys.iter().any(|&key| {
+            matches!(
+                KeyCode(key),
+                KeyCode::KEY_LEFTSHIFT
+                    | KeyCode::KEY_RIGHTSHIFT
+                    | KeyCode::KEY_LEFTALT
+                    | KeyCode::KEY_RIGHTALT
+                    | KeyCode::KEY_LEFTMETA
+                    | KeyCode::KEY_RIGHTMETA
+            )
+        })
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn toggle_requires_complete_chord_and_accepts_either_side() {
-        assert!(chord([19, 29, 42]));
-        assert!(chord([19, 97, 54]));
-        assert!(!chord([19, 29]));
-        assert!(!chord([19, 29, 56])); // Old Ctrl+Alt+R must pass through.
-        assert!(!chord([29, 42]));
-        assert_eq!(keys::usage(88), Some(69)); // F12 is now forwarded normally.
+        let chord = |keys: &[KeyCode]| super::chord(keys.iter().map(|key| key.0));
+        let semicolon = KeyCode::KEY_SEMICOLON;
+        for ctrl in [KeyCode::KEY_LEFTCTRL, KeyCode::KEY_RIGHTCTRL] {
+            assert!(chord(&[ctrl, semicolon]));
+            assert!(!chord(&[ctrl]));
+            for modifier in [
+                KeyCode::KEY_LEFTSHIFT,
+                KeyCode::KEY_RIGHTSHIFT,
+                KeyCode::KEY_LEFTALT,
+                KeyCode::KEY_RIGHTALT,
+                KeyCode::KEY_LEFTMETA,
+                KeyCode::KEY_RIGHTMETA,
+            ] {
+                assert!(!chord(&[ctrl, modifier, semicolon]));
+            }
+        }
+        assert!(!chord(&[semicolon]));
+        assert!(!chord(&[
+            KeyCode::KEY_LEFTCTRL,
+            KeyCode::KEY_LEFTSHIFT,
+            KeyCode::KEY_R,
+        ]));
     }
 }

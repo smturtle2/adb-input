@@ -42,7 +42,7 @@ Publishing a `vX.Y.Z` tag is a separate action; creating these files does not pu
 
 `adb-input probe` tests agent startup/device creation and cleanup without capturing
 or typing. Before this Rust implementation, the basic UHID path was tested on an S25;
-the Rust agent, CLI keyboard/mouse forwarding and Ctrl+Shift+R switching were then
+the Rust agent, CLI keyboard/mouse forwarding and input switching were then
 confirmed on the same device over a VPN from a remote desktop session. Other vendors
 and ARM64 Linux hosts have not received interactive hardware testing yet.
 

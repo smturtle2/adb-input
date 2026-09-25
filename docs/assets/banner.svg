@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1100" height="340" viewBox="0 0 1100 340" role="img" aria-labelledby="title desc">
   <title id="title">adb-input</title>
-  <desc id="desc">Your keyboard and mouse. On Android. Linux to Android over ADB, switched with Ctrl + Shift + R.</desc>
+  <desc id="desc">Your keyboard and mouse. On Android. Linux to Android over ADB, switched with Ctrl + ;.</desc>
   <defs>
     <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#111b2a"/><stop offset="1" stop-color="#182d36"/></linearGradient>
     <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse"><path d="M28 0H0V28" fill="none" stroke="#8de4ce" stroke-opacity=".045"/></pattern>
@@ -12,7 +12,7 @@
     <text x="53" y="138" fill="#f1f6f8" font-size="64" font-weight="750" letter-spacing="-3">adb-input</text>
     <text x="56" y="185" fill="#c0ced7" font-size="23">Your keyboard and mouse. On Android.</text>
     <rect x="56" y="232" width="206" height="44" rx="9" fill="#79dbc1"/>
-    <text x="159" y="260" text-anchor="middle" fill="#112c2c" font-size="16" font-weight="700">Ctrl + Shift + R</text>
+    <text x="159" y="260" text-anchor="middle" fill="#112c2c" font-size="16" font-weight="700">Ctrl + ;</text>
     <text x="281" y="260" fill="#a5bac5" font-size="15">Switch input.</text>
   </g>
   <g fill="none" stroke="#79dbc1" stroke-width="2.5" stroke-linejoin="round">

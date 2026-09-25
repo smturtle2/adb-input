@@ -35,7 +35,7 @@ enum Action {
     Devices,
     /// Diagnose ADB availability and desktop input permissions
     Doctor,
-    /// Forward input; Ctrl+Shift+R toggles between desktop and Android
+    /// Forward input; Ctrl+; toggles between desktop and Android
     Run {
         /// ADB serial; automatically selected when exactly one device is online
         #[arg(short, long)]

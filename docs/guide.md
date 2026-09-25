@@ -63,7 +63,7 @@ and UI instances. If the file cannot be read or saved, a warning is shown and th
 app remains usable; unreadable or invalid existing data is preserved.
 
 During a session, the UI shows the current **DESKTOP** or **PHONE** mode and the
-Ctrl+Shift+R shortcut. Ctrl+C or Esc in DESKTOP mode stops the session and returns to
+Ctrl+; shortcut. Ctrl+C or Esc in DESKTOP mode stops the session and returns to
 the home screen. Interactive mode requires an ANSI-capable terminal; `NO_COLOR` and
 `TERM=dumb` select monochrome output. If the terminal is too small, resize it as
 prompted. Terminal state, the cursor, and the alternate screen are restored on normal,
@@ -88,14 +88,17 @@ the same movement over ADB as a backup; if UDP cannot reach the phone, ADB conti
 alone. Keyboard input, clicks, switching, and shutdown stay on ADB. The Android agent
 uses a temporary UDP port for the session, so VPN or firewall rules must allow that
 port for the faster path.
-Start in **DESKTOP** mode. Press and release **Ctrl+Shift+R** to switch to **PHONE**;
+Start in **DESKTOP** mode. Press and release **Ctrl+;** to switch to **PHONE**;
 press and release it again to return. The chord is reserved and is not typed into
 the phone. F12 is a normal forwarded key. Exit with Ctrl+C from desktop mode.
 In desktop mode the chord is observed, not reserved in the compositor: the focused
-desktop application may also react to Ctrl+Shift+R. This backend does not register
+desktop application may also react to Ctrl+;. This backend does not register
 or override desktop-global shortcuts. Phone mode suppresses the chord from Android.
+Either Ctrl key works. Adding Shift, Alt, or Meta keeps the combination as ordinary
+input instead of switching. The shortcut uses the physical semicolon key on a US
+keyboard layout.
 
-While switching, release all held keyboard keys. This prevents Ctrl/Shift or other
+While switching, release all held keyboard keys. This prevents Ctrl or other
 keys from remaining pressed on either side. Each physical or logical input device
 is tracked separately; releasing one keyboard does not release a key held on another.
 

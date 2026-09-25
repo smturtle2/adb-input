@@ -209,7 +209,7 @@ fn session(
         }
         terminal.draw(Screen {
             lines,
-            footer: "Ctrl+Shift+R Switch   Ctrl+C Stop (desktop)".into(),
+            footer: "Ctrl+; Switch   Ctrl+C Stop (desktop)".into(),
         })?;
         let key = terminal.key(Duration::ZERO)?;
         Ok(!(mode == input::Mode::Local && matches!(key, Some(Key::Escape | Key::Interrupt))))
